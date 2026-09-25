@@ -51,55 +51,61 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
     let adapters = manager.adapters().await.context("listing BLE adapters")?;
     let central = adapters.into_iter().next().context("no BLE adapter found")?;
 
-    let filter = ScanFilter {
-        services: vec![MATTER_SERVICE_UUID],
-    };
-    central.start_scan(filter).await.context("start BLE scan")?;
-
     let mut events = central.events().await.context("BLE event stream")?;
+    // Matter UUID can be present only in service data, which BlueZ's UUID filter can omit.
+    central.start_scan(ScanFilter::default()).await.context("start BLE scan")?;
     let deadline = tokio::time::Instant::now() + scan_timeout;
 
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            bail!("BLE scan timeout: no device with discriminator {} found", discriminator);
-        }
-        let event = tokio::time::timeout(remaining, events.next())
-            .await
-            .context("BLE scan timeout")?
-            .context("BLE event stream ended")?;
-
-        match event {
-            CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => {
-                let peripheral = central.peripheral(&id).await?;
-                let props = match peripheral.properties().await? {
-                    Some(p) => p,
-                    None => continue,
-                };
-                // Look for service data for our UUID
-                let svc_data = props
-                    .service_data
-                    .get(&MATTER_SERVICE_UUID)
-                    .cloned()
-                    .unwrap_or_default();
-                if svc_data.len() < 8 {
-                    continue;
-                }
-                let (disc, vid, pid, cm_flag) = parse_service_data(&svc_data);
-                log::debug!("BLE found device: disc={} vid={} pid={} cm={}", disc, vid, pid, cm_flag);
-                let matches = if short_match {
-                    disc >> 8 == discriminator >> 8
-                } else {
-                    disc == discriminator
-                };
-                if matches {
-                    central.stop_scan().await.ok();
-                    log::debug!("BLE device with matching discriminator found, connecting...");
-                    return connect_peripheral(peripheral).await;
-                }
+    let found: Result<Peripheral> = async {
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("BLE scan timeout: no device with discriminator {} found", discriminator);
             }
-            _ => {}
+            let event = tokio::time::timeout(remaining, events.next())
+                .await
+                .context("BLE scan timeout")?
+                .context("BLE event stream ended")?;
+
+            let (id, svc_data) = match event {
+                CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => {
+                    let peripheral = central.peripheral(&id).await?;
+                    let props = match peripheral.properties().await? {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    (id, props.service_data.get(&MATTER_SERVICE_UUID).cloned())
+                }
+                CentralEvent::ServiceDataAdvertisement { id, service_data } => {
+                    (id, service_data.get(&MATTER_SERVICE_UUID).cloned())
+                }
+                _ => continue,
+            };
+            let Some(svc_data) = svc_data else {
+                continue;
+            };
+            if matches_discriminator(&svc_data, discriminator, short_match) {
+                return central.peripheral(&id).await.context("BLE peripheral");
+            }
         }
+    }
+    .await;
+    central.stop_scan().await.ok();
+    let peripheral = found?;
+    log::debug!("BLE device with matching discriminator found, connecting...");
+    connect_peripheral(peripheral).await
+}
+
+fn matches_discriminator(svc_data: &[u8], discriminator: u16, short_match: bool) -> bool {
+    if svc_data.len() < 8 {
+        return false;
+    }
+    let (disc, vid, pid, _) = parse_service_data(svc_data);
+    log::debug!("BLE found device: disc={} vid={} pid={}", disc, vid, pid);
+    if short_match {
+        disc >> 8 == discriminator >> 8
+    } else {
+        disc == discriminator
     }
 }
 
@@ -256,4 +262,23 @@ fn hex_dump(data: &[u8]) -> String {
         let _ = write!(s, "{:02x} ", b);
     }
     s.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_discriminator;
+
+    #[test]
+    fn ble_advertisement_matches_full_and_short_discriminator() {
+        let service_data = [0x00, 0xbc, 0x0a, 0x2f, 0x13, 0x0d, 0x02, 0x00];
+
+        assert!(matches_discriminator(&service_data, 0x0abc, false));
+        assert!(!matches_discriminator(&service_data, 0x0abd, false));
+        assert!(matches_discriminator(&service_data, 0x0a00, true));
+        assert!(!matches_discriminator(&service_data, 0x0b00, true));
+        assert!(!matches_discriminator(&service_data[..7], 0x0abc, false));
+
+        let yndx_00525_service_data = [0x00, 0x60, 0x05, 0x2f, 0x13, 0x0d, 0x02, 0x00];
+        assert!(matches_discriminator(&yndx_00525_service_data, 0x0500, true));
+    }
 }
