@@ -100,8 +100,8 @@ fn matches_discriminator(svc_data: &[u8], discriminator: u16, short_match: bool)
     if svc_data.len() < 8 {
         return false;
     }
-    let (disc, vid, pid, _) = parse_service_data(svc_data);
-    log::debug!("BLE found device: disc={} vid={} pid={}", disc, vid, pid);
+    let (disc, vid, pid, cm_flag) = parse_service_data(svc_data);
+    log::debug!("BLE found device: disc={} vid={} pid={} cm={}", disc, vid, pid, cm_flag);
     if short_match {
         disc >> 8 == discriminator >> 8
     } else {
