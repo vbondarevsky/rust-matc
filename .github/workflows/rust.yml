@@ -2,7 +2,7 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "fix/matter-ble-service-data-scan" ]
   pull_request:
     branches: [ "main" ]
 
