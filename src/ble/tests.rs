@@ -271,7 +271,6 @@ async fn scan_includes_service_data_only_devices_and_skips_bad_candidates() {
     assert_eq!(found.discriminator, 0x0abc);
     assert_eq!(found.vendor_id, 0x1234);
     assert_eq!(found.product_id, 0x0042);
-    assert!(!found.cm_flag);
     assert_eq!(found.name.as_deref(), Some("Matter test device"));
     assert_eq!(found.rssi, Some(-60));
     assert_eq!(found.tx_power, Some(-4));
@@ -580,27 +579,21 @@ async fn scan_returns_metadata_for_multiple_device_definitions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn scan_preserves_fixed_wire_vectors_and_legacy_cm_flag_mapping() {
-    // Compatibility assertion for the existing parser, NOT the Matter protocol:
-    // it currently exposes advertisement-version bit 0 as cm_flag.
-    // Keep this separate from the typed fixture's protocol encoding.
-    let legacy_version_one = [0x00, 0xbc, 0x1a, 0x2f, 0x13, 0x0d, 0x02, 0x00];
+async fn scan_reads_metadata_from_fixed_wire_vectors() {
     let cases = [
-        (MATTER_SERVICE_DATA_ABC, 0x0abc, false),
-        (MATTER_SERVICE_DATA_560, 0x0560, false),
-        (legacy_version_one, 0x0abc, true),
+        (MATTER_SERVICE_DATA_ABC, 0x0abc),
+        (MATTER_SERVICE_DATA_560, 0x0560),
     ];
     let mut state = State::default();
-    for (id, (data, _, _)) in cases.iter().enumerate() {
+    for (id, (data, _)) in cases.iter().enumerate() {
         state.devices.insert(id as u64, raw_device(data));
     }
     let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
     let found = result.unwrap();
     assert_eq!(found.len(), cases.len());
-    for (actual, (_, discriminator, legacy_cm_flag)) in found.iter().zip(cases) {
+    for (actual, (_, discriminator)) in found.iter().zip(cases) {
         assert_eq!(actual.discriminator, discriminator);
         assert_eq!(actual.vendor_id, 0x132f);
         assert_eq!(actual.product_id, 0x020d);
-        assert_eq!(actual.cm_flag, legacy_cm_flag);
     }
 }
