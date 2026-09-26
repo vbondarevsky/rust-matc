@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "fix/matter-ble-service-data-scan" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "fix/matter-ble-service-data-scan" ]
 
 env:
   CARGO_TERM_COLOR: always

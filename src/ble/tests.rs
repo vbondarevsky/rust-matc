@@ -271,6 +271,7 @@ async fn scan_includes_service_data_only_devices_and_skips_bad_candidates() {
     assert_eq!(found.discriminator, 0x0abc);
     assert_eq!(found.vendor_id, 0x1234);
     assert_eq!(found.product_id, 0x0042);
+    assert_eq!(found.advertisement_version, 0);
     assert_eq!(found.name.as_deref(), Some("Matter test device"));
     assert_eq!(found.rssi, Some(-60));
     assert_eq!(found.tx_power, Some(-4));
@@ -561,6 +562,10 @@ async fn scan_returns_metadata_for_multiple_device_definitions() {
         assert_eq!(actual.discriminator, definition.discriminator);
         assert_eq!(actual.vendor_id, definition.vendor_id);
         assert_eq!(actual.product_id, definition.product_id);
+        assert_eq!(
+            actual.advertisement_version,
+            definition.advertisement_version
+        );
         assert_eq!(actual.name, definition.name);
         assert_eq!(actual.rssi, definition.rssi);
         assert_eq!(actual.tx_power, definition.tx_power);
@@ -579,21 +584,56 @@ async fn scan_returns_metadata_for_multiple_device_definitions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn scan_reads_metadata_from_fixed_wire_vectors() {
+async fn scan_reads_advertisement_versions_from_fixed_wire_vectors() {
     let cases = [
-        (MATTER_SERVICE_DATA_ABC, 0x0abc),
-        (MATTER_SERVICE_DATA_560, 0x0560),
+        (MATTER_SERVICE_DATA_ABC, 0x0abc, 0),
+        (MATTER_SERVICE_DATA_560, 0x0560, 0),
+        ([0x00, 0xbc, 0x1a, 0x2f, 0x13, 0x0d, 0x02, 0x00], 0x0abc, 1),
+        ([0x00, 0xbc, 0x2a, 0x2f, 0x13, 0x0d, 0x02, 0x00], 0x0abc, 2),
+        ([0x00, 0xbc, 0xfa, 0x2f, 0x13, 0x0d, 0x02, 0x00], 0x0abc, 15),
     ];
     let mut state = State::default();
-    for (id, (data, _)) in cases.iter().enumerate() {
+    for (id, (data, _, _)) in cases.iter().enumerate() {
         state.devices.insert(id as u64, raw_device(data));
     }
     let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
     let found = result.unwrap();
     assert_eq!(found.len(), cases.len());
-    for (actual, (_, discriminator)) in found.iter().zip(cases) {
+    for (actual, (_, discriminator, advertisement_version)) in found.iter().zip(cases) {
         assert_eq!(actual.discriminator, discriminator);
         assert_eq!(actual.vendor_id, 0x132f);
         assert_eq!(actual.product_id, 0x020d);
+        assert_eq!(actual.advertisement_version, advertisement_version);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_keeps_all_version_bits_separate_from_discriminator_and_flags() {
+    let mut definitions = Vec::new();
+    for discriminator in [0x0000, 0x0fff] {
+        for advertisement_version in 0..=15 {
+            definitions.push(TestDeviceDefinition {
+                id: definitions.len() as u64,
+                discriminator,
+                advertisement_version,
+                additional_flags: 0x03,
+                ..Default::default()
+            });
+        }
+    }
+    let mut state = State::default();
+    for definition in &definitions {
+        state.devices.insert(definition.id, definition.device());
+    }
+    let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+    let found = result.unwrap();
+    assert_eq!(found.len(), definitions.len());
+    for (actual, definition) in found.iter().zip(definitions) {
+        assert_eq!(actual.peripheral.id(), definition.id);
+        assert_eq!(actual.discriminator, definition.discriminator);
+        assert_eq!(
+            actual.advertisement_version,
+            definition.advertisement_version
+        );
     }
 }
