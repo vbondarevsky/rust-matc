@@ -148,7 +148,8 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
     let central = adapters.into_iter().next().context("no BLE adapter found")?;
 
     log::debug!("Starting BLE scan for commissionable devices ({}s timeout)...", scan_timeout.as_secs());
-    central.start_scan(ScanFilter { services: vec![MATTER_SERVICE_UUID] }).await?;
+    // Filter Matter service data below; the UUID need not be in the advertised service list.
+    central.start_scan(ScanFilter::default()).await.context("start BLE scan")?;
     log::debug!("Scanning for BLE devices...");
     tokio::time::sleep(scan_timeout).await;
     log::debug!("BLE scan complete, processing results...");
@@ -157,9 +158,16 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
 
     let mut found = Vec::new();
     for peripheral in central.peripherals().await? {
-        let props = match peripheral.properties().await? {
-            Some(p) => p,
-            None => continue,
+        let props = match peripheral.properties().await {
+            Ok(Some(props)) => props,
+            Ok(None) => continue,
+            Err(error) => {
+                log::debug!(
+                    "Skipping BLE candidate {}: properties unavailable: {:?}",
+                    peripheral.id(), error,
+                );
+                continue;
+            }
         };
         if let Some(svc_data) = props.service_data.get(&MATTER_SERVICE_UUID) {
             if svc_data.len() >= 8 {

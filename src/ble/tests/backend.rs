@@ -36,6 +36,7 @@ pub enum Call {
     Events,
     Start(ScanFilter),
     Stop,
+    List,
     Lookup(u64),
     Properties(u64),
     Connect(u64),
@@ -57,6 +58,7 @@ pub struct State {
     pub end_events: bool,
     pub start_error: bool,
     pub events_error: bool,
+    pub list_error: bool,
 }
 
 tokio::task_local! {
@@ -127,10 +129,12 @@ impl Adapter {
     }
 
     pub async fn peripherals(&self) -> Result<Vec<Peripheral>> {
-        Ok(self
-            .0
-            .lock()
-            .unwrap()
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(Call::List);
+        if state.list_error {
+            return Err(Error::PermissionDenied);
+        }
+        Ok(state
             .devices
             .keys()
             .map(|id| Peripheral {

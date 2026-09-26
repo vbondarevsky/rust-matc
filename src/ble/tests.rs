@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use btleplug::api::{PeripheralProperties, ScanFilter};
 
-use super::{find_by_discriminator, MATTER_SERVICE_UUID};
+use super::{find_by_discriminator, scan_commissionable, MATTER_SERVICE_UUID};
 use backend::{Call, CentralEvent, Device, State};
 
 pub(super) mod backend;
@@ -222,4 +222,104 @@ async fn find_preserves_connection_errors() {
         .unwrap()
         .calls
         .ends_with(&[Call::Stop, Call::Connect(1)]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_includes_service_data_only_devices_and_skips_bad_candidates() {
+    let mut state = State::default();
+    state.devices.insert(
+        1,
+        Device {
+            properties_failures: 1,
+            ..Default::default()
+        },
+    );
+    let mut data = DATA;
+    data[2] |= 0x10;
+    let mut expected = device(&data);
+    let props = expected.properties.as_mut().unwrap();
+    props.local_name = Some("Matter test device".to_owned());
+    props.rssi = Some(-60);
+    props.tx_power_level = Some(-4);
+    assert!(props.services.is_empty());
+    state.devices.insert(2, expected);
+    state.devices.insert(
+        3,
+        Device {
+            properties: Some(PeripheralProperties::default()),
+            ..Default::default()
+        },
+    );
+    state.devices.insert(4, device(&DATA[..7]));
+    state.devices.insert(5, Device::default());
+
+    let before = tokio::time::Instant::now();
+    let (result, state) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+    let found = result.unwrap();
+    assert_eq!(before.elapsed(), TIMEOUT);
+    assert_eq!(found.len(), 1);
+    let found = &found[0];
+    assert_eq!(found.discriminator, 0x0abc);
+    assert_eq!(found.vendor_id, 0x132f);
+    assert_eq!(found.product_id, 0x020d);
+    assert!(found.cm_flag);
+    assert_eq!(found.name.as_deref(), Some("Matter test device"));
+    assert_eq!(found.rssi, Some(-60));
+    assert_eq!(found.tx_power, Some(-4));
+    assert_eq!(found.address, "2");
+    assert_eq!(found.peripheral.id(), 2);
+    assert_eq!(
+        state.lock().unwrap().calls,
+        vec![
+            Call::Start(ScanFilter::default()),
+            Call::Stop,
+            Call::List,
+            Call::Properties(1),
+            Call::Properties(2),
+            Call::Properties(3),
+            Call::Properties(4),
+            Call::Properties(5),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_with_no_devices_returns_an_empty_list() {
+    let (result, state) = backend::run(State::default(), scan_commissionable(TIMEOUT)).await;
+    assert!(result.unwrap().is_empty());
+    assert_eq!(
+        state.lock().unwrap().calls,
+        vec![Call::Start(ScanFilter::default()), Call::Stop, Call::List,]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_preserves_start_and_enumeration_errors() {
+    let (result, state) = backend::run(
+        State {
+            start_error: true,
+            ..Default::default()
+        },
+        scan_commissionable(TIMEOUT),
+    )
+    .await;
+    assert_eq!(result.err().unwrap().to_string(), "start BLE scan");
+    assert_eq!(
+        state.lock().unwrap().calls,
+        vec![Call::Start(ScanFilter::default())]
+    );
+
+    let (result, state) = backend::run(
+        State {
+            list_error: true,
+            ..Default::default()
+        },
+        scan_commissionable(TIMEOUT),
+    )
+    .await;
+    assert_eq!(result.err().unwrap().to_string(), "Permission denied");
+    assert_eq!(
+        state.lock().unwrap().calls,
+        vec![Call::Start(ScanFilter::default()), Call::Stop, Call::List,]
+    );
 }
