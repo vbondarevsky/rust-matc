@@ -123,7 +123,9 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
         }
     }
     .await;
-    central.stop_scan().await.ok();
+    if let Err(error) = central.stop_scan().await {
+        log::warn!("BLE stop_scan failed: {:?}", error);
+    }
     let peripheral = found?;
     log::debug!("BLE device with matching discriminator found, connecting...");
     connect_peripheral(peripheral).await
@@ -153,7 +155,9 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
     log::debug!("Scanning for BLE devices...");
     tokio::time::sleep(scan_timeout).await;
     log::debug!("BLE scan complete, processing results...");
-    central.stop_scan().await.ok();
+    if let Err(error) = central.stop_scan().await {
+        log::warn!("BLE stop_scan failed: {:?}", error);
+    }
     log::debug!("Retrieving discovered BLE peripherals...");
 
     let mut found = Vec::new();

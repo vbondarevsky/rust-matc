@@ -323,3 +323,87 @@ async fn scan_preserves_start_and_enumeration_errors() {
         vec![Call::Start(ScanFilter::default()), Call::Stop, Call::List,]
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn find_warns_when_stop_fails_without_blocking_connection() {
+    let mut state = State {
+        events: vec![advertisement(1, &DATA)],
+        stop_error: true,
+        ..Default::default()
+    };
+    state.devices.insert(1, Device::default());
+    let (result, state) = backend::run(state, find_by_discriminator(0x0abc, false, TIMEOUT)).await;
+    finish(result);
+    let state = state.lock().unwrap();
+    assert!(state.calls.ends_with(&[Call::Stop, Call::Connect(1)]));
+    assert_eq!(
+        state.warnings,
+        vec!["BLE stop_scan failed: PermissionDenied"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn find_warns_when_stop_fails_without_masking_search_or_connection_errors() {
+    for end_events in [false, true] {
+        let state = State {
+            stop_error: true,
+            end_events,
+            ..Default::default()
+        };
+        let (result, state) =
+            backend::run(state, find_by_discriminator(0x0abc, false, TIMEOUT)).await;
+        let expected = if end_events {
+            "BLE event stream ended"
+        } else {
+            "BLE scan timeout"
+        };
+        assert_eq!(result.err().unwrap().to_string(), expected);
+        assert_eq!(
+            state.lock().unwrap().warnings,
+            vec!["BLE stop_scan failed: PermissionDenied"]
+        );
+    }
+
+    let mut state = State {
+        events: vec![advertisement(1, &DATA)],
+        stop_error: true,
+        ..Default::default()
+    };
+    state.devices.insert(
+        1,
+        Device {
+            connect_error: true,
+            ..Default::default()
+        },
+    );
+    let (result, state) = backend::run(state, find_by_discriminator(0x0abc, false, TIMEOUT)).await;
+    assert_eq!(result.err().unwrap().to_string(), "BLE connect");
+    assert_eq!(
+        state.lock().unwrap().warnings,
+        vec!["BLE stop_scan failed: PermissionDenied"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_warns_when_stop_fails_without_masking_results_or_enumeration_errors() {
+    for list_error in [false, true] {
+        let mut state = State {
+            stop_error: true,
+            list_error,
+            ..Default::default()
+        };
+        state.devices.insert(1, device(&DATA));
+        let (result, state) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+        if list_error {
+            assert_eq!(result.err().unwrap().to_string(), "Permission denied");
+        } else {
+            let found = result.unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].discriminator, 0x0abc);
+        }
+        assert_eq!(
+            state.lock().unwrap().warnings,
+            vec!["BLE stop_scan failed: PermissionDenied"]
+        );
+    }
+}

@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Once},
 };
 
 use btleplug::{
@@ -59,13 +59,43 @@ pub struct State {
     pub start_error: bool,
     pub events_error: bool,
     pub list_error: bool,
+    pub stop_error: bool,
+    pub warnings: Vec<String>,
 }
 
 tokio::task_local! {
     static CURRENT: Arc<Mutex<State>>;
 }
 
+struct TestLogger;
+
+impl log::Log for TestLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            // Each test captures only logs from its own task-local scenario.
+            let _ = CURRENT.try_with(|state| {
+                state
+                    .lock()
+                    .unwrap()
+                    .warnings
+                    .push(record.args().to_string());
+            });
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 pub async fn run<F: Future>(state: State, future: F) -> (F::Output, Arc<Mutex<State>>) {
+    static INIT_LOGGER: Once = Once::new();
+    INIT_LOGGER.call_once(|| {
+        log::set_logger(&TestLogger).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
     let state = Arc::new(Mutex::new(state));
     let output = CURRENT.scope(state.clone(), future).await;
     (output, state)
@@ -110,7 +140,11 @@ impl Adapter {
     }
 
     pub async fn stop_scan(&self) -> Result<()> {
-        self.0.lock().unwrap().calls.push(Call::Stop);
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(Call::Stop);
+        if state.stop_error {
+            return Err(Error::PermissionDenied);
+        }
         Ok(())
     }
 
