@@ -8,12 +8,14 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use btleplug::api::{ScanFilter, WriteType};
+#[cfg(not(test))]
 use btleplug::{
-    api::{
-        Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter, WriteType,
-    },
+    api::{Central, CentralEvent, Manager as _, Peripheral as _},
     platform::{Manager, Peripheral},
 };
+#[cfg(test)]
+use self::tests::backend::{CentralEvent, Manager, Peripheral};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -67,17 +69,37 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
                 .context("BLE scan timeout")?
                 .context("BLE event stream ended")?;
 
-            let (id, svc_data) = match event {
+            let (id, peripheral, svc_data) = match event {
                 CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => {
-                    let peripheral = central.peripheral(&id).await?;
-                    let props = match peripheral.properties().await? {
-                        Some(p) => p,
-                        None => continue,
+                    let peripheral = match central.peripheral(&id).await {
+                        Ok(peripheral) => peripheral,
+                        Err(error) => {
+                            log::debug!(
+                                "Skipping BLE candidate {}: peripheral lookup failed: {:?}",
+                                id, error,
+                            );
+                            continue;
+                        }
                     };
-                    (id, props.service_data.get(&MATTER_SERVICE_UUID).cloned())
+                    let props = match peripheral.properties().await {
+                        Ok(Some(props)) => props,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            log::debug!(
+                                "Skipping BLE candidate {}: properties unavailable: {:?}",
+                                id, error,
+                            );
+                            continue;
+                        }
+                    };
+                    (
+                        id,
+                        Some(peripheral),
+                        props.service_data.get(&MATTER_SERVICE_UUID).cloned(),
+                    )
                 }
                 CentralEvent::ServiceDataAdvertisement { id, service_data } => {
-                    (id, service_data.get(&MATTER_SERVICE_UUID).cloned())
+                    (id, None, service_data.get(&MATTER_SERVICE_UUID).cloned())
                 }
                 _ => continue,
             };
@@ -85,7 +107,18 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
                 continue;
             };
             if matches_discriminator(&svc_data, discriminator, short_match) {
-                return central.peripheral(&id).await.context("BLE peripheral");
+                if let Some(peripheral) = peripheral {
+                    return Ok(peripheral);
+                }
+                match central.peripheral(&id).await {
+                    Ok(peripheral) => return Ok(peripheral),
+                    Err(error) => {
+                        log::debug!(
+                            "Skipping BLE candidate {}: peripheral lookup failed: {:?}",
+                            id, error,
+                        );
+                    }
+                }
             }
         }
     }
@@ -265,20 +298,4 @@ fn hex_dump(data: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::matches_discriminator;
-
-    #[test]
-    fn ble_advertisement_matches_full_and_short_discriminator() {
-        let service_data = [0x00, 0xbc, 0x0a, 0x2f, 0x13, 0x0d, 0x02, 0x00];
-
-        assert!(matches_discriminator(&service_data, 0x0abc, false));
-        assert!(!matches_discriminator(&service_data, 0x0abd, false));
-        assert!(matches_discriminator(&service_data, 0x0a00, true));
-        assert!(!matches_discriminator(&service_data, 0x0b00, true));
-        assert!(!matches_discriminator(&service_data[..7], 0x0abc, false));
-
-        let yndx_00525_service_data = [0x00, 0x60, 0x05, 0x2f, 0x13, 0x0d, 0x02, 0x00];
-        assert!(matches_discriminator(&yndx_00525_service_data, 0x0500, true));
-    }
-}
+mod tests;
