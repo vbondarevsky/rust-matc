@@ -133,10 +133,9 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
 }
 
 fn matches_discriminator(svc_data: &[u8], discriminator: u16, short_match: bool) -> bool {
-    if svc_data.len() < 8 {
+    let Some((disc, vid, pid, advertisement_version)) = parse_service_data(svc_data) else {
         return false;
-    }
-    let (disc, vid, pid, advertisement_version) = parse_service_data(svc_data);
+    };
     log::debug!(
         "BLE found device: disc={} vid={} pid={} adv_version={}",
         disc, vid, pid, advertisement_version,
@@ -178,8 +177,7 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
             }
         };
         if let Some(svc_data) = props.service_data.get(&MATTER_SERVICE_UUID) {
-            if svc_data.len() >= 8 {
-                let (disc, vid, pid, advertisement_version) = parse_service_data(svc_data);
+            if let Some((disc, vid, pid, advertisement_version)) = parse_service_data(svc_data) {
                 found.push(CommissionableDevice {
                     discriminator: disc,
                     vendor_id: vid,
@@ -198,9 +196,13 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
 }
 
 
-/// Parse a Matter BLE advertisement service-data payload.
+/// Parse a Matter BLE Commissionable (OpCode 0x00) service-data payload.
+/// Returns `None` for truncated payloads or other OpCodes.
 /// Returns `(discriminator, vendor_id, product_id, advertisement_version)`.
-fn parse_service_data(data: &[u8]) -> (u16, u16, u16, u8) {
+fn parse_service_data(data: &[u8]) -> Option<(u16, u16, u16, u8)> {
+    if data.len() < 8 || data[0] != 0x00 {
+        return None;
+    }
     let disc_raw = (data[1] as u16) | ((data[2] as u16) << 8);
     let discriminator = disc_raw & 0x0fff;
     let advertisement_version = data[2] >> 4;
@@ -214,7 +216,7 @@ fn parse_service_data(data: &[u8]) -> (u16, u16, u16, u8) {
     } else {
         0
     };
-    (discriminator, vid, pid, advertisement_version)
+    Some((discriminator, vid, pid, advertisement_version))
 }
 
 /// Connect to a peripheral, discover BTP characteristics, and return a
