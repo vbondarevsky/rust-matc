@@ -197,6 +197,28 @@ async fn full_case_busy_uses_the_same_wait_and_deferral_policy() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn legacy_public_api_also_honors_resume_busy_without_new_deadline() {
+    let controller = controller(true).await;
+    let responder = Responder::new(vec![
+        (Duration::ZERO, Reply::Busy(5000)),
+        (Duration::ZERO, Reply::Resume),
+    ]);
+    let conn: Arc<dyn ConnectionTrait> = responder.clone();
+    assert_eq!(
+        controller
+            .auth_sigma_with_busy_retry(&conn, 7, 1)
+            .await
+            .unwrap()
+            .session_id,
+        42
+    );
+    let sent = responder.requests.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(|(_, resume)| *resume));
+    assert!(sent[1].0.duration_since(sent[0].0) >= Duration::from_secs(5));
+}
+
+#[tokio::test(start_paused = true)]
 async fn busy_longer_than_remaining_deadline_does_not_start_full_case() {
     let controller = controller(true).await;
     let responder = Responder::new(vec![(Duration::ZERO, Reply::Busy(5000))]);
