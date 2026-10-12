@@ -81,7 +81,7 @@ impl ConnectionBudget {
             Some(deadline) => match timeout_at(deadline, work).await {
                 // Tokio may poll a ready future before the expired timer. Do not
                 // return late connection authority even when that future is ready.
-                Ok(_) if Instant::now() >= deadline => Err(ConnectDeadline { stage }.into()),
+                Ok(Ok(_)) if Instant::now() >= deadline => Err(ConnectDeadline { stage }.into()),
                 Ok(result) => result,
                 Err(_) => Err(ConnectDeadline { stage }.into()),
             },
