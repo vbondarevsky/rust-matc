@@ -388,15 +388,15 @@ async fn main() -> Result<()> {
             if devices.is_empty() {
                 println!("No BLE commissionable devices found.");
             } else {
-                println!("{:<6} {:<6} {:<6} {:<3} {:<5} {:<20} Address",
-                         "Disc", "VID", "PID", "CM", "RSSI", "Name");
+                println!("{:<6} {:<6} {:<6} {:<6} {:<5} {:<20} Address",
+                         "Disc", "VID", "PID", "AdvVer", "RSSI", "Name");
                 println!("{}", "-".repeat(80));
                 for d in devices {
                     let rssi = d.rssi.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
                     let name = d.name.as_deref().unwrap_or("");
-                    println!("{:<6} 0x{:04x} 0x{:04x} {:<3} {:<5} {:<20} {}",
+                    println!("{:<6} 0x{:04x} 0x{:04x} {:<6} {:<5} {:<20} {}",
                              d.discriminator, d.vendor_id, d.product_id,
-                             if d.cm_flag { "y" } else { "n" },
+                             d.advertisement_version,
                              rssi, name, d.address);
                 }
             }

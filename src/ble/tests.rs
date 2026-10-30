@@ -13,6 +13,18 @@ mod fixtures;
 // OpCode, discriminator + advertisement version (LE), VID (LE), PID (LE), flags.
 const MATTER_SERVICE_DATA_ABC: [u8; 8] = [0x00, 0xbc, 0x0a, 0x2f, 0x13, 0x0d, 0x02, 0x00];
 const MATTER_SERVICE_DATA_560: [u8; 8] = [0x00, 0x60, 0x05, 0x2f, 0x13, 0x0d, 0x02, 0x00];
+// Synthetic Network Recovery: OpCode 0x01, version 0, recovery ID 5, flags 0.
+// Misreading it as Commissionable would produce discriminator 0x0500.
+const NETWORK_RECOVERY_SERVICE_DATA: [u8; 11] = [0x01, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 0];
+const UNKNOWN_OPCODE_SERVICE_DATA: [u8; 21] = [
+    0x02, 0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const RESERVED_OPCODE_SERVICE_DATA: [u8; 8] = [0xff, 0x00, 0x05, 0, 0, 0, 0, 0];
+const NON_COMMISSIONABLE_PAYLOADS: [&[u8]; 3] = [
+    &NETWORK_RECOVERY_SERVICE_DATA,
+    &UNKNOWN_OPCODE_SERVICE_DATA,
+    &RESERVED_OPCODE_SERVICE_DATA,
+];
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn finish(result: anyhow::Result<crate::btp::BlePeripheral>) {
@@ -271,6 +283,7 @@ async fn scan_includes_service_data_only_devices_and_skips_bad_candidates() {
     assert_eq!(found.discriminator, 0x0abc);
     assert_eq!(found.vendor_id, 0x1234);
     assert_eq!(found.product_id, 0x0042);
+    assert_eq!(found.advertisement_version, 0);
     assert_eq!(found.name.as_deref(), Some("Matter test device"));
     assert_eq!(found.rssi, Some(-60));
     assert_eq!(found.tx_power, Some(-4));
@@ -561,6 +574,10 @@ async fn scan_returns_metadata_for_multiple_device_definitions() {
         assert_eq!(actual.discriminator, definition.discriminator);
         assert_eq!(actual.vendor_id, definition.vendor_id);
         assert_eq!(actual.product_id, definition.product_id);
+        assert_eq!(
+            actual.advertisement_version,
+            definition.advertisement_version
+        );
         assert_eq!(actual.name, definition.name);
         assert_eq!(actual.rssi, definition.rssi);
         assert_eq!(actual.tx_power, definition.tx_power);
@@ -579,21 +596,233 @@ async fn scan_returns_metadata_for_multiple_device_definitions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn scan_reads_metadata_from_fixed_wire_vectors() {
+async fn scan_reads_advertisement_versions_from_fixed_wire_vectors() {
     let cases = [
-        (MATTER_SERVICE_DATA_ABC, 0x0abc),
-        (MATTER_SERVICE_DATA_560, 0x0560),
+        (MATTER_SERVICE_DATA_ABC, 0x0abc, 0),
+        (MATTER_SERVICE_DATA_560, 0x0560, 0),
+        ([0x00, 0xbc, 0x1a, 0x2f, 0x13, 0x0d, 0x02, 0x00], 0x0abc, 1),
+        ([0x00, 0xbc, 0x2a, 0x2f, 0x13, 0x0d, 0x02, 0x00], 0x0abc, 2),
+        ([0x00, 0xbc, 0xfa, 0x2f, 0x13, 0x0d, 0x02, 0x00], 0x0abc, 15),
     ];
     let mut state = State::default();
-    for (id, (data, _)) in cases.iter().enumerate() {
+    for (id, (data, _, _)) in cases.iter().enumerate() {
         state.devices.insert(id as u64, raw_device(data));
     }
     let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
     let found = result.unwrap();
     assert_eq!(found.len(), cases.len());
-    for (actual, (_, discriminator)) in found.iter().zip(cases) {
+    for (actual, (_, discriminator, advertisement_version)) in found.iter().zip(cases) {
         assert_eq!(actual.discriminator, discriminator);
         assert_eq!(actual.vendor_id, 0x132f);
         assert_eq!(actual.product_id, 0x020d);
+        assert_eq!(actual.advertisement_version, advertisement_version);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_keeps_all_version_bits_separate_from_discriminator_and_flags() {
+    let mut definitions = Vec::new();
+    for discriminator in [0x0000, 0x0fff] {
+        for advertisement_version in 0..=15 {
+            definitions.push(TestDeviceDefinition {
+                id: definitions.len() as u64,
+                discriminator,
+                advertisement_version,
+                additional_flags: 0x03,
+                ..Default::default()
+            });
+        }
+    }
+    let mut state = State::default();
+    for definition in &definitions {
+        state.devices.insert(definition.id, definition.device());
+    }
+    let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+    let found = result.unwrap();
+    assert_eq!(found.len(), definitions.len());
+    for (actual, definition) in found.iter().zip(definitions) {
+        assert_eq!(actual.peripheral.id(), definition.id);
+        assert_eq!(actual.discriminator, definition.discriminator);
+        assert_eq!(
+            actual.advertisement_version,
+            definition.advertisement_version
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn find_skips_non_commissionable_opcodes() {
+    for data in NON_COMMISSIONABLE_PAYLOADS {
+        for short_match in [false, true] {
+            let target = TestDeviceDefinition {
+                id: 2,
+                discriminator: if short_match { 0x0560 } else { 0x0500 },
+                ..Default::default()
+            };
+            for event in [
+                raw_advertisement(1, data),
+                CentralEvent::DeviceDiscovered(1),
+                CentralEvent::DeviceUpdated(1),
+            ] {
+                let service_data_event =
+                    matches!(&event, CentralEvent::ServiceDataAdvertisement { .. });
+                let mut state = State {
+                    events: vec![event, target.advertisement()],
+                    ..Default::default()
+                };
+                // The rejected peripheral exists and can connect: only its OpCode rules it out.
+                state.devices.insert(1, raw_device(data));
+                state.devices.insert(target.id, target.device());
+                let (result, state) =
+                    backend::run(state, find_by_discriminator(0x0500, short_match, TIMEOUT)).await;
+                finish(result);
+
+                let mut expected = vec![Call::Events, Call::Start(ScanFilter::default())];
+                if !service_data_event {
+                    expected.extend([Call::Lookup(1), Call::Properties(1)]);
+                }
+                expected.extend([Call::Lookup(2), Call::Stop, Call::Connect(2)]);
+                assert_eq!(
+                    state.lock().unwrap().calls,
+                    expected,
+                    "OpCode {:#04x}, short_match={short_match}, service_data_event={service_data_event}",
+                    data[0],
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn scan_excludes_non_commissionable_opcodes() {
+    for include_commissionable in [false, true] {
+        let mut state = State::default();
+        for (index, data) in NON_COMMISSIONABLE_PAYLOADS.iter().enumerate() {
+            state.devices.insert(index as u64 + 1, raw_device(data));
+        }
+        if include_commissionable {
+            for id in [0, 4] {
+                let definition = TestDeviceDefinition {
+                    id,
+                    discriminator: 0x0500,
+                    ..Default::default()
+                };
+                state.devices.insert(id, definition.device());
+            }
+        }
+
+        let (result, state) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+        let found = result.unwrap();
+        let ids: Vec<_> = found.iter().map(|device| device.peripheral.id()).collect();
+        assert_eq!(
+            ids,
+            if include_commissionable {
+                vec![0, 4]
+            } else {
+                vec![]
+            }
+        );
+        for device in &found {
+            assert_eq!(device.discriminator, 0x0500);
+        }
+        let mut expected = vec![Call::Start(ScanFilter::default()), Call::Stop, Call::List];
+        if include_commissionable {
+            expected.push(Call::Properties(0));
+        }
+        expected.extend([
+            Call::Properties(1),
+            Call::Properties(2),
+            Call::Properties(3),
+        ]);
+        if include_commissionable {
+            expected.push(Call::Properties(4));
+        }
+        assert_eq!(state.lock().unwrap().calls, expected);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn discovery_ignores_truncated_service_data() {
+    let target = TestDeviceDefinition {
+        id: 2,
+        discriminator: 0x0560,
+        ..Default::default()
+    };
+    for len in 0..8 {
+        let data = &MATTER_SERVICE_DATA_560[..len];
+        for event in [
+            raw_advertisement(1, data),
+            CentralEvent::DeviceDiscovered(1),
+            CentralEvent::DeviceUpdated(1),
+        ] {
+            let mut state = State {
+                events: vec![event, target.advertisement()],
+                ..Default::default()
+            };
+            state.devices.insert(1, raw_device(data));
+            state.devices.insert(target.id, target.device());
+            let (result, state) =
+                backend::run(state, find_by_discriminator(0x0560, false, TIMEOUT)).await;
+            finish(result);
+            let state = state.lock().unwrap();
+            assert!(
+                !state.calls.contains(&Call::Connect(1)),
+                "payload length {len}"
+            );
+            assert!(state.calls.ends_with(&[Call::Stop, Call::Connect(2)]));
+        }
+
+        let mut state = State::default();
+        state.devices.insert(1, raw_device(data));
+        state.devices.insert(target.id, target.device());
+        let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+        let found = result.unwrap();
+        assert_eq!(found.len(), 1, "payload length {len}");
+        assert_eq!(found[0].peripheral.id(), target.id);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn discovery_preserves_minimum_length_policy() {
+    for len in [8, 9, 21] {
+        let mut data = MATTER_SERVICE_DATA_560.to_vec();
+        // Exercise the existing minimum-length policy, not validity of extended wire formats.
+        data.resize(len, 0xa5);
+        for short_match in [false, true] {
+            for event in [
+                raw_advertisement(1, &data),
+                CentralEvent::DeviceDiscovered(1),
+                CentralEvent::DeviceUpdated(1),
+            ] {
+                let mut state = State {
+                    events: vec![event],
+                    ..Default::default()
+                };
+                state.devices.insert(1, raw_device(&data));
+                let discriminator = if short_match { 0x0500 } else { 0x0560 };
+                let (result, state) = backend::run(
+                    state,
+                    find_by_discriminator(discriminator, short_match, TIMEOUT),
+                )
+                .await;
+                finish(result);
+                assert!(state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .ends_with(&[Call::Stop, Call::Connect(1)]));
+            }
+        }
+
+        let mut state = State::default();
+        state.devices.insert(1, raw_device(&data));
+        let (result, _) = backend::run(state, scan_commissionable(TIMEOUT)).await;
+        let found = result.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].peripheral.id(), 1);
+        assert_eq!(found[0].discriminator, 0x0560);
+        assert_eq!(found[0].advertisement_version, 0);
+        assert_eq!(found[0].vendor_id, 0x132f);
+        assert_eq!(found[0].product_id, 0x020d);
     }
 }

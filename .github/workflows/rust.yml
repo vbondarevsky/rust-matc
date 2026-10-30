@@ -4,7 +4,10 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+      - fix/matter-ble-service-data-scan
+      - fix/matter-ble-advertisement-version
 
 env:
   CARGO_TERM_COLOR: always
